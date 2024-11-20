@@ -2,6 +2,12 @@
 
 `Replacer` is a simple and efficient package for performing text replacements in files. It allows you to search for specific text patterns and replace them with desired content.
 
+## Usage
+
+```shell
+replacer <search> <replace> <path>
+```
+
 ## Contributing
 
 Contributions are welcome! Please fork the repository and submit a pull request.
