@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -44,10 +45,12 @@ func main() {
 	smallFiles := make(chan string, workers)
 	errs := make([]error, 0)
 
-	err := walk(rootPath, largeFiles, smallFiles, errs)
-	if err != nil {
-		fmt.Println(err)
-	}
+	go func() {
+		err := walk(ctx, rootPath, largeFiles, smallFiles, errs)
+		if err != nil {
+			fmt.Println(err)
+		}
+	}()
 
 	wg := sync.WaitGroup{}
 
@@ -56,6 +59,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for path := range smallFiles {
+				log.Printf("Processing %s", path)
 				select {
 				case <-ctx.Done():
 					errs = append(errs, ctx.Err())
@@ -76,6 +80,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for path := range largeFiles {
+				log.Printf("Processing %s", path)
 				select {
 				case <-ctx.Done():
 					errs = append(errs, ctx.Err())
@@ -100,20 +105,53 @@ func main() {
 	os.Exit(0)
 }
 
+// walk wraps walkDir and closes the channels when the walk is done.
 func walk(
+	ctx context.Context,
 	path string,
 	largeFiles,
 	smallFiles chan string,
 	errs []error,
 ) error {
-	err := filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
+	err := walkDir(ctx, path, largeFiles, smallFiles, errs)
+
+	close(largeFiles)
+	close(smallFiles)
+
+	return err
+}
+
+// walkDir walks the directory tree rooted at path and sends the paths of large
+// files to largeFiles and the paths of small files to smallFiles.
+func walkDir(
+	ctx context.Context,
+	path string,
+	largeFiles,
+	smallFiles chan string,
+	errs []error,
+) error {
+	initialPath := path
+
+	return filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		if path == initialPath {
+			return nil
+		}
+
+		log.Printf("Walking %s", path)
+
 		if err != nil {
 			errs = append(errs, err)
 			return nil
 		}
 
 		if info.IsDir() {
-			err := walk(path, largeFiles, smallFiles, errs)
+			err := walkDir(ctx, path, largeFiles, smallFiles, errs)
 			if err != nil {
 				errs = append(errs, err)
 			}
@@ -123,17 +161,13 @@ func walk(
 
 		if info.Size() > maxFileSize {
 			largeFiles <- path
+			return nil
 		}
 
 		smallFiles <- path
 
 		return nil
 	})
-
-	close(largeFiles)
-	close(smallFiles)
-
-	return err
 }
 
 func replaceInFile(path, search, replace string) error {
@@ -141,6 +175,8 @@ func replaceInFile(path, search, replace string) error {
 	if err != nil {
 		return err
 	}
+
+	defer input.Close()
 
 	b, err := io.ReadAll(input)
 	if err != nil {
